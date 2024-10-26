@@ -1,245 +1,256 @@
-import numpy as np
-from fastdtw import fastdtw
-from scipy.spatial.distance import euclidean
 import cv2
+import numpy as np
 from ultralytics import YOLO
-import matplotlib.pyplot as plt
-#https://youtube.com/shorts/T0m9Q3dGu1c?si=vRn1hpDO7ReOkzOW
-#https://www.youtube.com/watch?v=9LSIy2NWmiA
+import math
+import os
 
+def calculate_angle(a, b, c):
+    """
+    Calcula el ángulo entre tres puntos
+    Args:
+        a: primer punto [x, y]
+        b: punto medio [x, y]
+        c: último punto [x, y]
+    Returns:
+        ángulo en grados
+    """
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
+    
+    radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
+    angle = np.abs(radians * 180.0 / np.pi)
+    
+    if angle > 180.0:
+        angle = 360 - angle
+        
+    return angle
 
-#NumPy (np) maneja operaciones con arreglos y cálculos matemáticos.
-#FastDTW: Algoritmo de Dynamic Time Warping que compara secuencias temporales.
-#SciPy: Contiene la función euclidean para calcular distancias entre puntos.
-#cv2: Usada para manipulación de video.
-#YOLO: Red neuronal que detecta la pose humana en imágenes/videos.
-#Matplotlib (plt): Crea gráficas para visualizar resultados.
-
-
-class AnalizadorSentadillas:
-    def __init__(self):
-        self.model = YOLO('yolov8n-pose.pt') # Carga el modelo YOLO entrenado para detección de poses
-        self.umbrales = {  # Umbrales para detectar posibles errores
-            'rodillas': {
-                'min_flexion': 80,  # Ángulo mínimo de flexión de rodilla
-                'max_flexion': 100,  # Ángulo máximo de flexión de rodilla
-                'diferencia_maxima': 15  # Diferencia máxima entre rodillas
-            },
-            'cadera': {
-                'min_flexion': 70,  # Ángulo mínimo de flexión de cadera
-                'max_flexion': 100  # Ángulo máximo de flexión de cadera
-            },
-            'tobillos': {
-                'min_angulo': 70,  # Ángulo mínimo de tobillo
-                'max_angulo': 90   # Ángulo máximo de tobillo
-            },
-            'espalda': {
-                'max_inclinacion': 45  # Inclinación máxima de la espalda
+def calculate_body_angles(keypoints):
+    """
+    Calcula los ángulos de todas las partes principales del cuerpo
+    Args:
+        keypoints: array de puntos clave detectados
+    Returns:
+        diccionario con todos los ángulos corporales
+    """
+    body_angles = {}
+    points = {}
+    
+    # Verificar confianza mínima para los puntos
+    confidence_threshold = 0.5
+    
+    # Calcular puntos medios útiles
+    if all(keypoints[[5,6], 2] > confidence_threshold):  # hombros
+        points['mid_shoulders'] = (keypoints[5][:2] + keypoints[6][:2]) / 2
+    if all(keypoints[[11,12], 2] > confidence_threshold):  # caderas
+        points['mid_hips'] = (keypoints[11][:2] + keypoints[12][:2]) / 2
+    if all(keypoints[[13,14], 2] > confidence_threshold):  # rodillas
+        points['mid_knees'] = (keypoints[13][:2] + keypoints[14][:2]) / 2
+    
+    # 1. Análisis de Columna
+    if all(key in points for key in ['mid_shoulders', 'mid_hips', 'mid_knees']) and keypoints[0,2] > confidence_threshold:
+        # Punto de referencia vertical (100px arriba de los hombros)
+        vertical_reference = np.array([points['mid_shoulders'][0], points['mid_shoulders'][1] - 100])
+        
+        body_angles['columna'] = {
+            'superior': calculate_angle(keypoints[0][:2], points['mid_shoulders'], points['mid_hips']),
+            'inferior': calculate_angle(points['mid_shoulders'], points['mid_hips'], points['mid_knees']),
+            'inclinacion_lateral': calculate_angle(vertical_reference, points['mid_shoulders'], points['mid_hips'])
+        }
+    
+    # 2. Análisis de Brazos
+    for side, (shoulder, elbow, wrist) in {'izquierdo': (5,7,9), 'derecho': (6,8,10)}.items():
+        if all(keypoints[[shoulder,elbow,wrist], 2] > confidence_threshold):
+            body_angles[f'brazo_{side}'] = {
+                'hombro': calculate_angle(points['mid_shoulders'], keypoints[shoulder][:2], keypoints[elbow][:2]),
+                'codo': calculate_angle(keypoints[shoulder][:2], keypoints[elbow][:2], keypoints[wrist][:2])
             }
+    
+    # 3. Análisis de Piernas
+    for side, (hip, knee, ankle) in {'izquierda': (11,13,15), 'derecha': (12,14,16)}.items():
+        if all(keypoints[[hip,knee,ankle], 2] > confidence_threshold):
+            body_angles[f'pierna_{side}'] = {
+                'cadera': calculate_angle(points['mid_hips'], keypoints[hip][:2], keypoints[knee][:2]),
+                'rodilla': calculate_angle(keypoints[hip][:2], keypoints[knee][:2], keypoints[ankle][:2])
+            }
+    
+    # 4. Análisis de Cabeza/Cuello
+    if all(keypoints[[0,5,6], 2] > confidence_threshold):  # nariz y hombros
+        vertical_head = np.array([keypoints[0][0], keypoints[0][1] - 100])  # punto 100px arriba de la nariz
+        body_angles['cabeza'] = {
+            'inclinacion': calculate_angle(vertical_head, keypoints[0][:2], points['mid_shoulders'])
+        }
+    
+    body_angles['puntos'] = points
+    return body_angles
+
+def draw_body_analysis(frame, body_angles):
+    """
+    Dibuja las líneas y ángulos de todas las partes del cuerpo analizadas
+    """
+    if not body_angles or 'puntos' not in body_angles:
+        return frame
+    
+    # Colores para diferentes partes
+    colors = {
+        'columna': (0, 0, 255),    # Rojo
+        'brazos': (255, 0, 0),     # Azul
+        'piernas': (0, 255, 0),    # Verde
+        'cabeza': (255, 255, 0)    # Amarillo
+    }
+    
+    # Función auxiliar para dibujar texto
+    def put_angle_text(text, position, line_num):
+        cv2.putText(frame, text, (10, 30 * line_num), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    
+    line_count = 1
+    
+    # 1. Mostrar ángulos de columna
+    if 'columna' in body_angles:
+        col = body_angles['columna']
+        put_angle_text(f"Columna Sup.: {col['superior']:.1f}°", 10, line_count)
+        line_count += 1
+        put_angle_text(f"Columna Inf.: {col['inferior']:.1f}°", 10, line_count)
+        line_count += 1
+        put_angle_text(f"Incl. Lateral: {col['inclinacion_lateral']:.1f}°", 10, line_count)
+        line_count += 1
+    
+    # 2. Mostrar ángulos de brazos
+    for side in ['izquierdo', 'derecho']:
+        key = f'brazo_{side}'
+        if key in body_angles:
+            angles = body_angles[key]
+            put_angle_text(f"Hombro {side}: {angles['hombro']:.1f}°", 10, line_count)
+            line_count += 1
+            put_angle_text(f"Codo {side}: {angles['codo']:.1f}°", 10, line_count)
+            line_count += 1
+    
+    # 3. Mostrar ángulos de piernas
+    for side in ['izquierda', 'derecha']:
+        key = f'pierna_{side}'
+        if key in body_angles:
+            angles = body_angles[key]
+            put_angle_text(f"Cadera {side}: {angles['cadera']:.1f}°", 10, line_count)
+            line_count += 1
+            put_angle_text(f"Rodilla {side}: {angles['rodilla']:.1f}°", 10, line_count)
+            line_count += 1
+    
+    # 4. Mostrar ángulos de cabeza
+    if 'cabeza' in body_angles:
+        put_angle_text(f"Incl. Cabeza: {body_angles['cabeza']['inclinacion']:.1f}°", 10, line_count)
+    
+    return frame
+
+def process_video(source_path):
+    try:
+        if not os.path.exists(source_path):
+            print(f"Error: El archivo {source_path} no existe")
+            return
+            
+        print("Cargando modelo YOLOv8...")
+        model = YOLO('yolov8s-pose.pt')
+        
+        # Definir las conexiones entre keypoints
+        connections = [
+            # Cara
+            (0, 1), (0, 2),  # Nariz a ojos
+            (1, 3), (2, 4),  # Ojos a orejas
+            # Brazos
+            (5, 7), (7, 9),    # Brazo izquierdo
+            (6, 8), (8, 10),   # Brazo derecho
+            # Torso
+            (5, 6),    # Hombros
+            (5, 11), (6, 12),  # Hombros a caderas
+            (11, 12),  # Caderas
+            # Piernas
+            (11, 13), (13, 15),  # Pierna izquierda
+            (12, 14), (14, 16)   # Pierna derecha
+        ]
+        
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened():
+            print("Error: No se pudo abrir el video")
+            return
+        
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        
+        output_path = 'output_video.mp4'
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+        
+        keypoint_names = {
+            0: "nariz", 1: "ojo_izq", 2: "ojo_der", 3: "oreja_izq", 4: "oreja_der",
+            5: "hombro_izq", 6: "hombro_der", 7: "codo_izq", 8: "codo_der",
+            9: "muñeca_izq", 10: "muñeca_der", 11: "cadera_izq", 12: "cadera_der",
+            13: "rodilla_izq", 14: "rodilla_der", 15: "tobillo_izq", 16: "tobillo_der"
         }
         
-    def calcular_angulo(self, p1, p2, p3):
-        """
-        Calcula el ángulo entre tres puntos
-        """
-        a = np.array(p1) #convierte el punto en array
-        b = np.array(p2)
-        c = np.array(p3)
-        
-        ba = a - b 
-        bc = c - b
-        
-        cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-        angle = np.arccos(cosine_angle) #radianes
-        
-        return np.degrees(angle) #angulos
-
-    def extraer_angulos_frame(self, keypoints):
-        """
-        Extrae los ángulos relevantes de los keypoints de un frame
-        """
-        # Índices de los keypoints relevantes en YOLO
-        RODILLA_DER = 14
-        CADERA_DER = 12
-        TOBILLO_DER = 16
-        RODILLA_IZQ = 13
-        CADERA_IZQ = 11
-        TOBILLO_IZQ = 15
-        HOMBRO_DER = 6
-        HOMBRO_IZQ = 5
-        
-        try:
-            # Calcular ángulos de rodillas
-            rodilla_der = self.calcular_angulo(
-                keypoints[CADERA_DER], 
-                keypoints[RODILLA_DER], 
-                keypoints[TOBILLO_DER]
-            )
-            
-            rodilla_izq = self.calcular_angulo(
-                keypoints[CADERA_IZQ], 
-                keypoints[RODILLA_IZQ], 
-                keypoints[TOBILLO_IZQ]
-            )
-            
-            # Calcular ángulo de cadera
-            cadera = self.calcular_angulo(
-                keypoints[HOMBRO_DER], 
-                keypoints[CADERA_DER], 
-                keypoints[RODILLA_DER]
-            )
-            
-            # Calcular ángulos de tobillos
-            tobillo_der = self.calcular_angulo(
-                keypoints[RODILLA_DER],
-                keypoints[TOBILLO_DER],
-                [keypoints[TOBILLO_DER][0], keypoints[TOBILLO_DER][1] + 10]  # Punto en el suelo
-            )
-            
-            tobillo_izq = self.calcular_angulo(
-                keypoints[RODILLA_IZQ],
-                keypoints[TOBILLO_IZQ],
-                [keypoints[TOBILLO_IZQ][0], keypoints[TOBILLO_IZQ][1] + 10]
-            )
-            
-            # Calcular ángulo de espalda (con respecto a la vertical)
-            espalda = self.calcular_angulo(
-                keypoints[HOMBRO_DER],
-                keypoints[CADERA_DER],
-                [keypoints[CADERA_DER][0], keypoints[CADERA_DER][1] - 10]  # Punto vertical
-            )
-            
-            return np.array([
-                rodilla_der, rodilla_izq,
-                cadera,
-                tobillo_der, tobillo_izq,
-                espalda
-            ])
-            
-        except:
-            return None
-
-    def procesar_video(self, video_path):
-        """
-        Procesa un video y extrae los ángulos de cada frame
-        """
-        cap = cv2.VideoCapture(video_path)
-        angulos_frames = []
+        print("Procesando video... Presiona 'q' para salir")
+        frame_count = 0
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
+                print("Fin del video")
                 break
                 
-            results = self.model(frame)
-            keypoints = results[0].keypoints.cpu().numpy()[0]
+            frame_count += 1
+            print(f"Procesando frame {frame_count}", end='\r')
             
-            angulos = self.extraer_angulos_frame(keypoints)
-            if angulos is not None:
-                angulos_frames.append(angulos)
-                
+            results = model(frame)
+            
+            if len(results[0].keypoints.data) > 0:
+                for person in results[0].keypoints.data:
+                    keypoints = person.cpu().numpy()
+                    
+                    # Calcular ángulos del cuerpo
+                    body_angles = calculate_body_angles(keypoints)
+                    
+                    # Dibujar análisis del cuerpo
+                    frame = draw_body_analysis(frame, body_angles)
+                    
+                    # Dibujar las conexiones del esqueleto
+                    for connection in connections:
+                        start_idx, end_idx = connection
+                        if keypoints[start_idx][2] > 0.5 and keypoints[end_idx][2] > 0.5:
+                            start_point = tuple(map(int, keypoints[start_idx][:2]))
+                            end_point = tuple(map(int, keypoints[end_idx][:2]))
+                            cv2.line(frame, start_point, end_point, (0, 255, 255), 2)
+                    
+                    # Dibujar los keypoints
+                    for idx, point in enumerate(keypoints):
+                        x, y = point[:2]
+                        confidence = point[2]
+                        
+                        if confidence > 0.5:
+                            cv2.circle(frame, (int(x), int(y)), 5, (0, 255, 0), -1)
+                            cv2.putText(frame, keypoint_names[idx], 
+                                      (int(x), int(y)-10),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 
+                                      0.5, (255, 255, 255), 1)
+            
+            cv2.imshow('Pose Detection', frame)
+            out.write(frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("\nProceso interrumpido por el usuario")
+                break
+        
         cap.release()
-        return np.array(angulos_frames)
-
-    def analizar_sentadilla(self, video_referencia, video_prueba):
-        """
-        Analiza una sentadilla comparándola con una referencia
-        """
-        # Procesar videos
-        angulos_referencia = self.procesar_video(video_referencia)
-        angulos_prueba = self.procesar_video(video_prueba)
+        out.release()
+        cv2.destroyAllWindows()
+        print(f"\nVideo procesado y guardado como: {output_path}")
         
-        # Comparar usando DTW
-        distancia, camino = fastdtw(angulos_referencia, angulos_prueba)
-        
-        # Analizar errores
-        errores = self.detectar_errores(angulos_prueba)
-        
-        # Generar visualización
-        self.visualizar_comparacion(angulos_referencia, angulos_prueba, camino)
-        
-        return errores, distancia
-
-    def detectar_errores(self, angulos):
-        """
-        Detecta errores específicos en la ejecución de la sentadilla
-        """
-        errores = []
-        
-        # Analizar rodillas
-        rodilla_der = angulos[:, 0]
-        rodilla_izq = angulos[:, 1]
-        
-        if np.min(rodilla_der) > self.umbrales['rodillas']['min_flexion']:
-            errores.append("La rodilla derecha no se flexiona lo suficiente")
-        elif np.min(rodilla_der) < self.umbrales['rodillas']['max_flexion']:
-            errores.append("La rodilla derecha se flexiona demasiado")
-            
-        if np.max(np.abs(rodilla_der - rodilla_izq)) > self.umbrales['rodillas']['diferencia_maxima']:
-            errores.append("Las rodillas no están simétricas durante el movimiento")
-        
-        # Analizar cadera
-        cadera = angulos[:, 2]
-        if np.min(cadera) < self.umbrales['cadera']['min_flexion']:
-            errores.append("La cadera se flexiona demasiado")
-        elif np.min(cadera) > self.umbrales['cadera']['max_flexion']:
-            errores.append("La cadera no se flexiona lo suficiente")
-        
-        # Analizar tobillos
-        tobillo_der = angulos[:, 3]
-        tobillo_izq = angulos[:, 4]
-        
-        if np.min(tobillo_der) < self.umbrales['tobillos']['min_angulo']:
-            errores.append("El tobillo derecho tiene demasiada flexión")
-        if np.min(tobillo_izq) < self.umbrales['tobillos']['min_angulo']:
-            errores.append("El tobillo izquierdo tiene demasiada flexión")
-        
-        # Analizar espalda
-        espalda = angulos[:, 5]
-        if np.max(espalda) > self.umbrales['espalda']['max_inclinacion']:
-            errores.append("La espalda está demasiado inclinada hacia adelante")
-        
-        return errores
-
-    def visualizar_comparacion(self, angulos_ref, angulos_prueba, camino):
-        """
-        Genera gráficas comparativas de los ángulos
-        """
-        partes = ['Rodilla Der', 'Rodilla Izq', 'Cadera', 'Tobillo Der', 'Tobillo Izq', 'Espalda']
-        
-        plt.figure(figsize=(15, 10))
-        for i, parte in enumerate(partes):
-            plt.subplot(3, 2, i+1)
-            plt.plot(angulos_ref[:, i], label='Referencia', color='green')
-            plt.plot(angulos_prueba[:, i], label='Prueba', color='red')
-            plt.title(parte)
-            plt.legend()
-            plt.grid(True)
-        
-        plt.tight_layout()
-        plt.show()
-
-# Ejemplo de uso
-def main():
-    analizador = AnalizadorSentadillas()
-    
-    # Rutas de los videos (ajusta estas rutas según tus archivos)
-    video_referencia = "sentadilla_perfecta.mp4"
-    video_prueba = "sentadilla_prueba.mp4"
-    
-    # Analizar sentadilla
-    errores, distancia = analizador.analizar_sentadilla(video_referencia, video_prueba)
-    
-    # Mostrar resultados
-    print("\nResultados del análisis:")
-    print(f"Distancia total DTW: {distancia:.2f}")
-    
-    if errores:
-        print("\nErrores detectados:")
-        for i, error in enumerate(errores, 1):
-            print(f"{i}. {error}")
-    else:
-        print("\n¡Excelente! No se detectaron errores significativos.")
+    except Exception as e:
+        print(f"\nError durante la ejecución: {str(e)}")
+        print(f"Tipo de error: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    main()
+    video_path = "sentadilla.mp4"
+    process_video(video_path)
