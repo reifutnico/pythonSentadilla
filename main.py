@@ -238,9 +238,10 @@ def process_video(source_path,source_pathPrueba):
             
             cv2.imshow('Pose Detection', frame)
             out.write(frame)
-            
+            print("a")
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("\nProceso interrumpido por el usuario")
+                
                 break
         
         cap.release()
