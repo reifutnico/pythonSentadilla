@@ -102,7 +102,7 @@ def draw_body_analysis(frame, body_angles):
     
     # Función auxiliar para dibujar texto
     def put_angle_text(text, position, line_num):
-        cv2.putText(frame, text, (10, 30 * line_num), 
+        cv2.putText(frame, text, (10, 40 * line_num), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     line_count = 1
@@ -143,16 +143,19 @@ def draw_body_analysis(frame, body_angles):
     
     return frame
 
-def process_video(source_path):
+def process_video(source_path,source_pathPrueba):
     try:
         if not os.path.exists(source_path):
             print(f"Error: El archivo {source_path} no existe")
             return
-            
+        
+        if not os.path.exists(source_pathPrueba):
+            print(f"Error: El archivo {source_pathPrueba} no existe")
+            return
+        
+        print("Ambos archivos existen, continuando con el procesamiento...")
         print("Cargando modelo YOLOv8...")
         model = YOLO('yolov8s-pose.pt')
-        
-        # Definir las conexiones entre keypoints
         connections = [
             # Cara
             (0, 1), (0, 2),  # Nariz a ojos
@@ -178,7 +181,7 @@ def process_video(source_path):
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         
-        output_path = 'output_video.mp4'
+        output_path = 'output_video2.mp4'
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
         
@@ -252,5 +255,7 @@ def process_video(source_path):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    video_path = "sentadilla.mp4"
-    process_video(video_path)
+    video_sentadilla = "sentadilla.mp4"
+    video_prueba = "sentadillaPrueba.mp4"
+    process_video(video_sentadilla,video_prueba)
+    
